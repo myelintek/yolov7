@@ -4,6 +4,7 @@ steps:
   - name: Checkout code
     type: checkout
     needs: null
+    git: https://github.com/myelintek/yolov7
     location: .
   - name: Git clone myelintek/yolov7 example and setup. Install required packages and train
     type: docker_run
