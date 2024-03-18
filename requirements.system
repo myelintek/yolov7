@@ -1,0 +1,14 @@
+git
+net-tools
+unzip
+vim
+wget
+zip
+wget
+curl
+htop
+screen
+libgl1-mesa-glx
+libsm6
+libxext6
+libxrender-dev
