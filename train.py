@@ -1,10 +1,8 @@
 import argparse
-import bentoml
 import logging
 import math
 import os
 import re
-import mlflow
 import random
 import time
 from copy import deepcopy
@@ -37,45 +35,12 @@ from utils.loss import ComputeLoss, ComputeLossOTA
 from utils.plots import plot_images, plot_labels, plot_results, plot_evolution
 from utils.torch_utils import ModelEMA, select_device, intersect_dicts, torch_distributed_zero_first, is_parallel
 from utils.wandb_logging.wandb_utils import WandbLogger, check_wandb_resume
-from mlflow.models.signature import infer_signature
 
+LOCAL_RANK = int(os.getenv('LOCAL_RANK', -1))
 
 logger = logging.getLogger(__name__)
 
-def process_bentoml(model_path):
-    # Option 1
-    # bento = bentoml.bentos.build_bentofile("bentofile.yaml")
-    
-    # Option 2
-    bento = bentoml.bentos.build(
-        service="service:svc",
-        labels=dict(
-            owner="Myelintek",
-            tage="dev"
-        ),
-        include=[
-            "service.py",
-            "models/*.py",
-            "utils/*.py",
-            model_path
-        ],
-        python=dict(
-            requirements_txt="./requirements.txt",
-        ),
-        docker=dict(
-            distro="debian",
-            python_version="3.8.12",
-            cuda_version="11.6.2",
-            system_packages=["ffmpeg", "libsm6", "libxext6"]
-        )
-    )
-    exported_bento = bentoml.bentos.export_bento(f"{bento.tag.name}:{bento.tag.version}", "./")
-    mlflow.log_artifact(exported_bento)
-
 def train(hyp, opt, device, tb_writer=None):
-    mlflow_signature = None
-    mlflow_experience_name = "yolov7"
-    mlflow.set_experiment(mlflow_experience_name)
     logger.info(colorstr('hyperparameters: ') + ', '.join(f'{k}={v}' for k, v in hyp.items()))
     save_dir, epochs, batch_size, total_batch_size, weights, rank, freeze = \
         Path(opt.save_dir), opt.epochs, opt.batch_size, opt.total_batch_size, opt.weights, opt.global_rank, opt.freeze
@@ -396,11 +361,6 @@ def train(hyp, opt, device, tb_writer=None):
             # Forward
             with amp.autocast(enabled=cuda):
                 pred = model(imgs)  # forward
-                if mlflow_signature is None:
-                    mlflow_signature = infer_signature(
-                        imgs.cpu().numpy(),
-                        pred[0].detach().cpu().numpy()
-                    )
                 if 'loss_ota' not in hyp or hyp['loss_ota'] == 1:
                     loss, loss_items = compute_loss_ota(pred, targets.to(device), imgs)  # loss scaled by batch_size
                 else:
@@ -486,7 +446,6 @@ def train(hyp, opt, device, tb_writer=None):
                     wandb_logger.log({tag: x})  # W&B
                 tag = re.sub('[^a-zA-Z0-9\/\_\-\. ]', '-', tag)
                 # we remove not allowed characters from the tags.
-                mlflow.log_metric(tag, float(x), epoch)
 
             # Update best mAP
             fi = fitness(np.array(results).reshape(1, -1))  # weighted combination of [P, R, mAP@.5, mAP@.5-.95]
@@ -509,12 +468,6 @@ def train(hyp, opt, device, tb_writer=None):
                 torch.save(ckpt, last)
                 if best_fitness == fi:
                     torch.save(ckpt, best)
-                    # Store the best model in the MLmodel format. 
-                    mlflow.pytorch.log_model(
-                        ckpt['model'], 
-                        mlflow_experience_name, 
-                        signature=mlflow_signature
-                    )
                 if (best_fitness == fi) and (epoch >= 200):
                     torch.save(ckpt, wdir / 'best_{:03d}.pt'.format(epoch))
                 if epoch == 0:
@@ -572,7 +525,6 @@ def train(hyp, opt, device, tb_writer=None):
     else:
         dist.destroy_process_group()
 
-    process_bentoml(best)
     torch.cuda.empty_cache()
     return results
 
@@ -600,7 +552,7 @@ if __name__ == '__main__':
     parser.add_argument('--single-cls', action='store_true', help='train multi-class data as single-class')
     parser.add_argument('--adam', action='store_true', help='use torch.optim.Adam() optimizer')
     parser.add_argument('--sync-bn', action='store_true', help='use SyncBatchNorm, only available in DDP mode')
-    parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
+    parser.add_argument('--local-rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--workers', type=int, default=8, help='maximum number of dataloader workers')
     parser.add_argument('--project', default='runs/train', help='save to project/name')
     parser.add_argument('--entity', default=None, help='W&B entity')
@@ -617,6 +569,8 @@ if __name__ == '__main__':
     parser.add_argument('--v5-metric', action='store_true', help='assume maximum recall as 1.0 in AP calculation')
     opt = parser.parse_args()
 
+    logger.info("local_rank: {}".format(opt.local_rank))
+    logger.info("LOCAL_RANK: {}".format(LOCAL_RANK))
     # Set DDP variables
     opt.world_size = int(os.environ['WORLD_SIZE']) if 'WORLD_SIZE' in os.environ else 1
     opt.global_rank = int(os.environ['RANK']) if 'RANK' in os.environ else -1
